@@ -72,7 +72,9 @@ window.__ModuleLoader__.load({
     /** 执行 client 平面脚本（故障隔离：单脚本异常只记自己）。 */
     async function runClientScripts(host) {
       try {
-        const data = await fetch(ROUTE)
+        // fetch 返回的是 Response，必须 .json() 解出数据（旧写法把 Response 当数据用，data.clientScripts 恒 undefined）
+        const res = await fetch(ROUTE)
+        const data = await res.json()
         if (!data?.ok) throw new Error(`面板数据获取失败: ${JSON.stringify(data).slice(0, 200)}`)
         host.debug = Boolean(data.debug)
         for (const pkg of data.clientScripts ?? []) {
@@ -119,7 +121,8 @@ window.__ModuleLoader__.load({
 
     /** 把面板数据渲染进容器（数据结构同 GET /dsh-kubejs/panel）。 */
     function buildPanelDOM(container, data) {
-      const pkgs = data.packages ?? []
+      // 面板数据里脚本包在 state.packages（顶层 data.packages 不存在，旧写法导致恒显示 0）
+      const pkgs = data.state?.packages ?? data.packages ?? []
       const rows = pkgs.map((p) => `
         <div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;border-bottom:1px dashed var(--border-color, #e5e5e5)">
           ${badge(p.status)}
