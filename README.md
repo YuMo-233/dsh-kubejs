@@ -34,6 +34,18 @@
 
 ## 安装
 
+### 方式一：DSH 官方插件管理器（推荐）
+
+在 DSH Desktop 的「插件」面板中输入以下任一地址安装：
+
+```
+github:YuMo-233/dsh-kubejs
+```
+
+或直接填仓库地址 `https://github.com/YuMo-233/dsh-kubejs`。官方安装器会自动完成拉包、bundles 登记、cordis.patch.yml 注册，装完重启即可。
+
+### 方式二：开发安装（link，改代码即时生效）
+
 ```bash
 # 1. clone 到任意位置
 git clone https://github.com/YuMo-233/dsh-kubejs.git

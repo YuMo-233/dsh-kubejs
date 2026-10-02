@@ -19,11 +19,25 @@
   },
   "exports": {
     ".": "./index.js",
-    "./client": "./client.js"
+    "./client": "./client.js",
+    "./package.json": "./package.json"
   },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.4"
   },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "author": "YuMo (https://github.com/YuMo-233)",
+  "homepage": "https://github.com/YuMo-233/dsh-kubejs#readme",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
