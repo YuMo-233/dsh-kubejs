@@ -16,8 +16,9 @@ import { writeScriptOverrides, removeScriptEntries } from './lib/patch-ledger.js
  * @param {string} deps.profileName 当前激活 profile 名
  * @param {string} deps.patchPath   当前激活 profile 的 cordis.patch.yml 绝对路径
  * @param {object} [deps.notify]    通知渠道 { send(name, message, level) }
+ * @param {string} [deps.root]      脚本根目录覆写（默认 DSH_HOME/dsh-kubejs；测试注入用）
  */
-export function createHost({ ctx, logger, profileName, patchPath, notify }) {
+export function createHost({ ctx, logger, profileName, patchPath, notify, root }) {
 	const hooks = new Map();          // scriptName -> [{event, handler}]
 	const wrapped = new Map();        // scriptName -> [{serviceName, wrapper, applied}]
 	const failed = new Set();         // 已触发故障隔离的脚本
@@ -145,7 +146,7 @@ export function createHost({ ctx, logger, profileName, patchPath, notify }) {
 	 * @param {(name: string) => {installed: boolean, version?: string}} [opts.resolvePlugin]
 	 */
 	async function loadAll({ resolvePlugin } = {}) {
-		const { packages, errors, root } = scanPackages({ profile: profileName, resolvePlugin });
+		const { packages, errors, root: scanRoot } = scanPackages({ profile: profileName, resolvePlugin, root });
 		for (const error of errors) {
 			log.warn(`脚本目录扫描异常: ${error.error}`);
 		}
@@ -238,7 +239,7 @@ export function createHost({ ctx, logger, profileName, patchPath, notify }) {
 	 * 只返回状态 ok 的 client 包；每项 { name, target, files: [{file, code}] }。
 	 */
 	function collectClientScripts() {
-		const { packages } = scanPackages({ profile: profileName });
+		const { packages } = scanPackages({ profile: profileName, root });
 		const out = [];
 		for (const pkg of packages) {
 			if (pkg.plane !== 'client_scripts' || pkg.status !== 'ok') continue;
