@@ -1,7 +1,7 @@
 /**
  * dsh-kubejs client 平面：
- * 1. 注册管理面板入口按钮（conversation.session.header.actions 槽位）
- * 2. 面板用纯 DOM 渲染（避免 React 版本耦合），数据走同源路由 /dsh-kubejs/panel
+ * 1. 侧边栏「脚本」入口（sidebar.panellist 图标 + main 主面板页面，插件按钮旁）
+ * 2. 管理面板页面用纯 DOM 渲染（避免 React 版本耦合），数据走同源路由 /dsh-kubejs/panel
  * 3. 执行 client_scripts 脚本：RPC 拉源码 → new Function 执行 → api.slot 可注册 UI
  *
  * client 脚本约定：纯脚本体（非 ESM），定义 function activate(api) 即会被调用；
@@ -11,10 +11,12 @@ window.__ModuleLoader__.load({
   id: 'dsh-kubejs/client',
   factory(require) {
     const react = require('react')
+    const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
 
     const ROUTE = '/dsh-kubejs/panel'
     const MARK = 'data-dsh-kubejs'
     const NS = 'dsh-kubejs'
+    const PANEL_ID = 'dsh-kubejs' // 侧边栏入口与主面板页面共用此 id（sidebar.panellist 的 list id ↔ main 的 key）
 
     // ---- 客户端脚本运行时状态 ----
     const executedScripts = new Map() // name -> { ok, error }
@@ -97,13 +99,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    // ---- 面板 DOM（纯实现） ----
-    let panelEl = null
-
-    function closePanel() {
-      panelEl?.remove()
-      panelEl = null
-    }
+    // ---- 管理面板页面（纯 DOM 渲染，挂在 main 主面板） ----
 
     function esc(text) {
       const div = document.createElement('div')
@@ -121,38 +117,8 @@ window.__ModuleLoader__.load({
       return `<span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:${colors[status] ?? '#8b8b8b'}">${esc(status)}</span>`
     }
 
-    async function openPanel() {
-      closePanel()
-      const overlay = document.createElement('div')
-      overlay.setAttribute(MARK, 'panel')
-      Object.assign(overlay.style, {
-        position: 'fixed', inset: '0', zIndex: 99999,
-        background: 'rgba(0,0,0,0.35)', display: 'flex',
-        alignItems: 'center', justifyContent: 'center'
-      })
-      overlay.addEventListener('click', (e) => { if (e.target === overlay) closePanel() })
-
-      const dialog = document.createElement('div')
-      Object.assign(dialog.style, {
-        width: 'min(680px, 90vw)', maxHeight: '80vh', overflow: 'auto',
-        background: 'var(--bg-color, #fff)', color: 'var(--fg-color, #1f2328)',
-        borderRadius: '12px', padding: '16px 20px',
-        boxShadow: '0 8px 32px rgba(0,0,0,0.25)', fontSize: '13px', lineHeight: 1.6
-      })
-      overlay.appendChild(dialog)
-      document.body.appendChild(overlay)
-      panelEl = overlay
-      dialog.innerHTML = '<div style="opacity:.6">加载中…</div>'
-
-      let data
-      try {
-        data = await fetch(ROUTE)
-        data = await data.json()
-      } catch (error) {
-        dialog.innerHTML = `<div style="color:#c9372c">面板数据获取失败：${esc(error.message)}</div>`
-        return
-      }
-
+    /** 把面板数据渲染进容器（数据结构同 GET /dsh-kubejs/panel）。 */
+    function buildPanelDOM(container, data) {
       const pkgs = data.packages ?? []
       const rows = pkgs.map((p) => `
         <div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;border-bottom:1px dashed var(--border-color, #e5e5e5)">
@@ -173,45 +139,45 @@ window.__ModuleLoader__.load({
       const ledgerRows = (data.ledger ?? []).map((e) => `
         <div style="padding:2px 0"><code style="font-size:12px">${esc(e.script)}</code> <span style="opacity:.6">${esc(e.insertLine)}</span></div>`).join('')
 
-      dialog.innerHTML = `
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <b style="font-size:15px">dsh-kubejs 管理面板</b>
-          <span style="opacity:.6;font-size:12px">profile: ${esc(data.profile)} · root: ${esc(data.root)}</span>
-          <button data-act="close" style="cursor:pointer">✕</button>
-        </div>
-        <div style="display:flex;gap:8px;margin-bottom:10px">
-          <button data-act="reload" style="cursor:pointer">热重载</button>
-          <label style="display:flex;gap:4px;align-items:center;cursor:pointer">
-            <input type="checkbox" data-act="debug" ${data.debug ? 'checked' : ''}/> debug
-          </label>
-          <span style="opacity:.5;align-self:center">client 脚本重载后建议刷新页面</span>
-        </div>
-        <fieldset style="border:1px solid var(--border-color,#ddd);border-radius:8px;margin:0 0 10px">
-          <legend>脚本包（${pkgs.length}）</legend>
-          ${rows || '<div style="opacity:.5">无</div>'}
-        </fieldset>
-        <fieldset style="border:1px solid var(--border-color,#ddd);border-radius:8px;margin:0 0 10px">
-          <legend>client 脚本执行状态</legend>
-          ${scriptRows || '<div style="opacity:.5">无</div>'}
-        </fieldset>
-        <fieldset style="border:1px solid var(--border-color,#ddd);border-radius:8px;margin:0">
-          <legend>配置覆写账本（cordis.patch.yml managed 区块）</legend>
-          ${ledgerRows || '<div style="opacity:.5">无</div>'}
-        </fieldset>`
+      container.innerHTML = `
+        <div style="max-width:960px;margin:0 auto;padding:28px clamp(24px,4vw,48px) 48px;box-sizing:border-box">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+            <b style="font-size:18px">dsh-kubejs 管理面板</b>
+            <span style="opacity:.6;font-size:12px">profile: ${esc(data.profile)} · root: ${esc(data.root)}</span>
+          </div>
+          <div style="display:flex;gap:12px;align-items:center;margin-bottom:14px">
+            <button data-act="reload" style="cursor:pointer">热重载</button>
+            <label style="display:flex;gap:4px;align-items:center;cursor:pointer">
+              <input type="checkbox" data-act="debug" ${data.debug ? 'checked' : ''}/> debug
+            </label>
+            <span style="opacity:.5;font-size:12px">client 脚本重载后建议刷新页面</span>
+          </div>
+          <fieldset style="border:1px solid var(--border-color,#ddd);border-radius:8px;margin:0 0 10px">
+            <legend>脚本包（${pkgs.length}）</legend>
+            ${rows || '<div style="opacity:.5">无</div>'}
+          </fieldset>
+          <fieldset style="border:1px solid var(--border-color,#ddd);border-radius:8px;margin:0 0 10px">
+            <legend>client 脚本执行状态</legend>
+            ${scriptRows || '<div style="opacity:.5">无</div>'}
+          </fieldset>
+          <fieldset style="border:1px solid var(--border-color,#ddd);border-radius:8px;margin:0">
+            <legend>配置覆写账本（cordis.patch.yml managed 区块）</legend>
+            ${ledgerRows || '<div style="opacity:.5">无</div>'}
+          </fieldset>
+        </div>`
 
-      dialog.querySelector('[data-act="close"]').addEventListener('click', closePanel)
-      dialog.querySelector('[data-act="reload"]').addEventListener('click', async () => {
+      container.querySelector('[data-act="reload"]').addEventListener('click', async () => {
         try {
           const res = await fetch(ROUTE, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'reload' }) })
           const out = await res.json()
           console.info('[dsh-kubejs] reload 结果:', out)
           // server 侧重载完成；client 脚本不重复执行（刷新页面生效）
-          openPanel()
+          buildPanelDOM(container, await (await fetch(ROUTE)).json())
         } catch (error) {
           console.error('[dsh-kubejs] reload 失败:', error)
         }
       })
-      dialog.querySelector('[data-act="debug"]').addEventListener('change', async (e) => {
+      container.querySelector('[data-act="debug"]').addEventListener('change', async (e) => {
         try {
           await fetch(ROUTE, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'setDebug', value: e.target.checked }) })
         } catch (error) {
@@ -220,18 +186,34 @@ window.__ModuleLoader__.load({
       })
     }
 
-    // ---- 面板入口按钮（槽位，subagent-model-switch 同款写法） ----
-    function PanelButton(props) {
-      const { available } = props
-      if (available === false) return null
-      return react.createElement('button', {
-        title: 'dsh-kubejs 管理面板',
-        onClick: (e) => { e.preventDefault(); openPanel() },
-        style: {
-          border: 'none', background: 'transparent', cursor: 'pointer',
-          fontSize: '11px', padding: '2px 6px', borderRadius: '6px', opacity: 0.65
-        }
-      }, 'KJS')
+    /** 主面板页面组件：挂载时拉数据并渲染。 */
+    function PanelPage() {
+      const ref = react.useRef(null)
+      react.useEffect(() => {
+        const el = ref.current
+        let alive = true
+        el.innerHTML = '<div style="opacity:.6;padding:28px">加载中…</div>'
+        fetch(ROUTE)
+          .then((r) => r.json())
+          .then((data) => { if (alive && el.isConnected) buildPanelDOM(el, data) })
+          .catch((error) => { if (alive && el.isConnected) el.innerHTML = `<div style="color:#c9372c;padding:28px">面板数据获取失败：${esc(error.message)}</div>` })
+        return () => { alive = false }
+      }, [])
+      return react.createElement('div', {
+        ref,
+        [MARK]: 'page',
+        style: { height: '100%', overflow: 'auto', boxSizing: 'border-box', color: 'var(--dsw-alias-label-primary, #1f2328)' }
+      })
+    }
+
+    // ---- 侧边栏「脚本」图标（SidebarPanelIconOwnerProps: { size, active }） ----
+    function PanelIcon({ size }) {
+      const Icon = primitives?.IconCodeOutlineRegular
+      return Icon
+        ? react.createElement(Icon, { size })
+        : react.createElement('span', {
+            style: { width: size, height: size, display: 'inline-block', textAlign: 'center', lineHeight: `${size}px`, fontSize: size * 0.7 }
+          }, '📜')
     }
 
     const inject = ['slots']
@@ -243,12 +225,18 @@ window.__ModuleLoader__.load({
         _debug: false
       }
       ctx.inject(['slots'], (scope) => {
-        scope.slots.inject('conversation.session.header.actions', () => scope.slots.register({
-          name: 'conversation.session.header.actions',
-          id: 'dsh-kubejs-panel',
-          order: -30,
-          inject: (sessionId) => ({ available: true, sessionId })
-        }, PanelButton))
+        // 侧边栏「脚本」入口：插件按钮 order 0、任务管理器 order 10，此处排插件按钮旁
+        scope.slots.inject('sidebar.panellist', () => scope.slots.register({
+          name: 'sidebar.panellist',
+          id: PANEL_ID,
+          order: 1,
+          label: '脚本'
+        }, PanelIcon))
+        // 主面板页面：key 与侧边栏入口 id 配对，点击图标即显示
+        scope.slots.inject('main', () => scope.slots.register({
+          name: 'main',
+          key: PANEL_ID
+        }, PanelPage))
       })
       // 拉取并执行 client_scripts（一次；面板 reload 不重复执行，提示刷新）
       Promise.resolve().then(() => runClientScripts(host))
