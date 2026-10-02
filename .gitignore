@@ -1,0 +1,15 @@
+# Node
+node_modules/
+*.log
+npm-debug.log*
+
+# 环境与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# 临时与测试产物
+*.tmp
+test/tmp/

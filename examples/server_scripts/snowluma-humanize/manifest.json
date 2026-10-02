@@ -1,0 +1,7 @@
+{
+  "target": "qq-bridge",
+  "targetRange": ">=0.0.0",
+  "description": "snowluma QQ 消息回复间隔人性化（server 事件钩子示例）",
+  "author": "dsh-kubejs",
+  "disabled": false
+}

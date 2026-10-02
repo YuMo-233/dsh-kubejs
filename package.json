@@ -1,0 +1,41 @@
+{
+  "name": "dsh-kubejs",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "dsh-kubejs —— DSH 插件修改者：以独立脚本包定制其他插件，不改任何插件源码（KubeJS 模式）",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "kubejs",
+    "plugin-modifier"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YuMo-233/dsh-kubejs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YuMo-233/dsh-kubejs/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
+    }
+  }
+}
