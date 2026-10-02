@@ -36,6 +36,9 @@
   "engines": {
     "node": ">=22.5.0"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "author": "YuMo (https://github.com/YuMo-233)",
   "homepage": "https://github.com/YuMo-233/dsh-kubejs#readme",
   "dsh": {
