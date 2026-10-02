@@ -42,25 +42,24 @@ function sendJson(res, status, data) {
 
 export const name = PLUGIN_NAME;
 
-export function apply(ctx) {
+export function apply(ctx, config) {
 	// ---- 基础依赖 ----
-	const logger = ctx.console ?? ctx.logger ?? console;
-	// 配置：dsh-kubejs.debug（读当前生效配置，缺省 false）
-	let debug = false;
-	try {
-		debug = Boolean(ctx.config?.get?.('dsh-kubejs.debug') ?? false);
-	} catch {
-		debug = false;
-	}
+	// ctx.logger 是 cordis 内置服务，一定可用；不要写 ctx.console / ctx.config 这类
+	// 未提供属性——cordis 的 ctx Proxy 会直接抛 `cannot get property "x" without inject`，
+	// `??` / `?.` 都挡不住，apply 会当场失败。
+	const logger = ctx.logger;
+	// 配置：行 config.debug（patch.yml 的 config 段），缺省 false
+	let debug = Boolean(config?.debug ?? false);
 
 	// ---- profile / patch.yml 定位 ----
-	// 优先用 cordis 提供的 profile 信息；否则回退 ~/.dsh/profiles/desktop
+	// 优先用 profileContext 服务（profile-boot 提供：{name, patchPath, dir, home, ...}）；
+	// 否则回退 ~/.dsh/profiles/desktop
 	let profileName = 'desktop';
 	let patchPath = join(dshHome(), 'profiles', profileName, 'cordis.patch.yml');
 	try {
-		const hinted = ctx.runtime?.profile ?? ctx.profile?.name;
-		if (typeof hinted === 'string' && hinted !== '') profileName = hinted;
-		if (typeof ctx.runtime?.patchPath === 'string') patchPath = ctx.runtime.patchPath;
+		const profileContext = ctx.get('profileContext');
+		if (typeof profileContext?.name === 'string' && profileContext.name !== '') profileName = profileContext.name;
+		if (typeof profileContext?.patchPath === 'string') patchPath = profileContext.patchPath;
 	} catch { /* 尽力推断 */ }
 
 	// ---- host 组装 ----
@@ -68,8 +67,13 @@ export function apply(ctx) {
 		send(_name, message, level) {
 			// 尽力而为：有 notify 服务就转发，否则只落日志
 			try {
-				ctx.notify?.send?.({ title: 'dsh-kubejs', message, level });
+				const service = ctx.get('notify');
+				if (service?.send) {
+					service.send({ title: 'dsh-kubejs', message, level });
+					return;
+				}
 			} catch { /* 忽略 */ }
+			logger.info?.(`[dsh-kubejs] ${message}`);
 		}
 	};
 	const host = createHost({ ctx, logger, profileName, patchPath, notify });
