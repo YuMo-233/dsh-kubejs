@@ -1,7 +1,7 @@
 /**
  * dsh-kubejs host（server 平面）：脚本包扫描、加载执行、故障隔离、原语 host 端实现。
  */
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { scanPackages, PLANES } from './lib/scanner.js';
@@ -23,6 +23,7 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 	const wrapped = new Map();        // scriptName -> [{serviceName, wrapper, applied}]
 	const failed = new Set();         // 已触发故障隔离的脚本
 	const loadedScripts = new Map();  // scriptName -> {pkg, api}
+	const bridges = new Map();        // event -> 宿主 cordis 注销函数（undefined = 离线/桩环境）
 	let packagesSnapshot = [];        // 最近一次 loadAll 的包列表（面板展示用）
 
 	const log = {
@@ -82,7 +83,9 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 
 	/**
 	 * 事件钩子注册。返回注销函数。
-	 * waterfall：handler(payload) 返回非 undefined 则替换负载。
+	 * 首次注册某事件时在宿主 cordis 上挂一个桥，把宿主事件转发给全部脚本 handler。
+	 * waterfall 语义：handler 返回 undefined = 透传（转调宿主 next()）；返回其它值 = 替换该次决策。
+	 * 想让内建逻辑先跑再改（推荐），handler 用 async 签名 (payload, next)：const decision = await next();
 	 */
 	function addHook(scriptName, event, handler) {
 		let list = hooks.get(scriptName);
@@ -92,31 +95,82 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 		}
 		const entry = { event, handler };
 		list.push(entry);
+		ensureBridge(event);
 		return () => {
 			const idx = list.indexOf(entry);
 			if (idx >= 0) list.splice(idx, 1);
 		};
 	}
 
+	/** 宿主事件桥：同一事件只挂一个 cordis 监听器（归属本插件 fiber，卸载/热重载自动摘除）。 */
+	function ensureBridge(event) {
+		if (bridges.has(event)) return;
+		if (typeof ctx?.on !== 'function') {
+			bridges.set(event, undefined); // 离线/桩环境：只走本地 emit
+			return;
+		}
+		const bridge = async (...args) => {
+			const last = args[args.length - 1];
+			const next = typeof last === 'function' ? args.pop() : undefined;
+			const { result, replaced } = await emitAsync(event, args.length === 1 ? args[0] : args, next);
+			if (typeof next !== 'function') return result; // emit 语义：宿主不消费返回值
+			return replaced ? result : next(); // waterfall：没人改写就放行
+		};
+		try {
+			bridges.set(event, ctx.on(event, bridge));
+			log.debug(`宿主事件桥已挂载: ${event}`);
+		} catch (error) {
+			bridges.set(event, undefined);
+			log.warn(`宿主事件桥挂载失败（${event}）: ${error?.message ?? error}`);
+		}
+	}
+
+	/** 摘除全部宿主事件桥（重载/卸载时调用）。 */
+	function disposeBridges() {
+		for (const dispose of bridges.values()) {
+			if (typeof dispose !== 'function') continue;
+			try {
+				dispose();
+			} catch (error) {
+				log.warn(`宿主事件桥摘除失败: ${error?.message ?? error}`);
+			}
+		}
+		bridges.clear();
+	}
+
 	/**
-	 * 事件分发（供插件在关键生命周期事件上调用，也可由 api.ctx.on 的旁路调用）。
-	 * 任何脚本 handler 异常只记日志，不影响其他脚本与 DSH。
+	 * 事件分发：按注册顺序跑一遍所有脚本 handler，返回最终负载与是否被替换。
+	 * handler 可为 async，签名 (payload, next)：返回 undefined 视为透传；对 waterfall 事件，
+	 * 需要保住内建决策时必须显式 await next() 再 spread 它的返回值。
+	 * 异常只记日志，不影响其他脚本与 DSH。
 	 */
-	function emit(event, payload) {
+	async function emitAsync(event, payload, next) {
 		let result = payload;
+		let replaced = false;
 		for (const [scriptName, list] of hooks) {
 			if (failed.has(scriptName) || list.length === 0) continue;
 			for (const { event: e, handler } of list) {
 				if (e !== event) continue;
 				try {
-					const next = handler(result);
-					if (next !== undefined) result = next;
+					const out = await handler(result, next);
+					if (out !== undefined) {
+						result = out;
+						replaced = true;
+					}
 				} catch (error) {
 					log.error(`事件 ${event} 处理异常（脚本 ${scriptName}）:`, error?.stack ?? error);
 				}
 			}
 		}
-		return result;
+		return { result, replaced };
+	}
+
+	/**
+	 * 事件分发（离线/外部驱动入口，等价于宿主 waterfall/emit）。
+	 * 无宿主内建逻辑时 next 是恒等函数：决策即当前负载，脚本用推荐形态仍能拿到原负载。
+	 */
+	function emit(event, payload) {
+		return emitAsync(event, payload, () => payload).then(({ result }) => result);
 	}
 
 	/** 服务包装注册（洋葱式）。实际应用由宿主在服务实例化点执行；返回撤销函数。 */
@@ -198,7 +252,9 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 	async function loadServerScript(pkg, file) {
 		const scriptName = file.replace(/\.js$/, '');
 		const scriptPath = join(pkg.dir, file);
-		const mod = await import(pathToFileURL(scriptPath).href);
+		// ?v=mtime：文件改过就必须拿到新代码（ESM 按 URL 缓存），否则「改脚本 → 重载」会静默无效
+		const stamp = statSync(scriptPath).mtimeMs;
+		const mod = await import(`${pathToFileURL(scriptPath).href}?v=${stamp}`);
 		const exporter = mod.default ?? mod;
 		// api 实例绑定脚本身份
 		const api = createScriptApi({
@@ -229,6 +285,7 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 
 	/** 卸载全部钩子（重载用）。 */
 	function unloadAll() {
+		disposeBridges();
 		hooks.clear();
 		wrapped.clear();
 		loadedScripts.clear();
@@ -238,8 +295,8 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 	 * 收集 client 平面脚本源码（下发浏览器执行用）。
 	 * 只返回状态 ok 的 client 包；每项 { name, target, files: [{file, code}] }。
 	 */
-	function collectClientScripts() {
-		const { packages } = scanPackages({ profile: profileName, root });
+	function collectClientScripts({ resolvePlugin } = {}) {
+		const { packages } = scanPackages({ profile: profileName, root, resolvePlugin });
 		const out = [];
 		for (const pkg of packages) {
 			if (pkg.plane !== 'client_scripts' || pkg.status !== 'ok') continue;
@@ -268,6 +325,7 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 				failed: [...failed],
 				hooks: hooks.size,
 				wrapped: wrapped.size,
+				bridges: [...bridges.keys()],
 				packages: packagesSnapshot
 			};
 		}

@@ -1,11 +1,11 @@
 /**
  * dsh-kubejs client 平面：
  * 1. 侧边栏「脚本」入口（sidebar.panellist 图标 + main 主面板页面，插件按钮旁）
- * 2. 管理面板页面用纯 DOM 渲染（避免 React 版本耦合），数据走同源路由 /dsh-kubejs/panel
+ * 2. 管理面板页面用 React + 官方 primitives 渲染（卡片布局对齐官方插件管理页），数据走同源路由 /dsh-kubejs/panel
  * 3. 执行 client_scripts 脚本：RPC 拉源码 → new Function 执行 → api.slot 可注册 UI
  *
- * client 脚本约定：纯脚本体（非 ESM），定义 function activate(api) 即会被调用；
- * api.require 可取 react 等浏览器侧模块（ModuleLoader 的 require）。
+ * 样式：不引用官方哈希类名（易随版本漂移），自建 kjs_ 前缀类名 + 同一套 dsw 设计令牌；
+ * 交互控件直接用 @deepseek-ai/dsh-client-ui-primitives（Switch / Button / Checkbox / Tag），与原生一致。
  */
 window.__ModuleLoader__.load({
   id: 'dsh-kubejs/client',
@@ -101,112 +101,207 @@ window.__ModuleLoader__.load({
       }
     }
 
-    // ---- 管理面板页面（纯 DOM 渲染，挂在 main 主面板） ----
+    // ---- 管理面板页面（React + 官方 primitives；卡片布局对齐官方插件管理页） ----
 
-    function esc(text) {
-      const div = document.createElement('div')
-      div.textContent = String(text ?? '')
-      return div.innerHTML
+    const PANEL_CSS_ID = `${NS}/panel.css`
+    // 只用 dsw 设计令牌，不引用官方哈希类名（那会随 DSH 版本漂移）
+    const PANEL_CSS = `
+.kjs_page{box-sizing:border-box;height:100%;color:var(--dsw-alias-label-primary);flex-direction:column;align-items:center;gap:32px;padding:0 clamp(24px,4vw,48px) 48px;display:flex;overflow:auto}
+.kjs_page>*{width:100%;max-width:960px}
+.kjs_pageHead{justify-content:space-between;align-items:flex-start;gap:16px;padding-top:calc(28px + var(--dsh-frame-top-clearance,0px));display:flex}
+.kjs_pageTitle{margin:0;font-size:20px;font-weight:500;line-height:28px}
+.kjs_pageIntro{color:var(--dsw-alias-label-secondary);margin:4px 0 0;font-size:13px;line-height:20px}
+.kjs_toolbar{justify-content:flex-end;align-items:center;gap:16px;display:flex}
+.kjs_hint{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.kjs_sectionHead{align-items:baseline;gap:10px;display:flex}
+.kjs_sectionTitle{margin:0;font-size:14px;font-weight:500;line-height:20px}
+.kjs_count{color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums;font-size:14px}
+.kjs_cards{flex-direction:column;gap:2px;list-style:none;margin:8px 0 0;padding:0;display:flex}
+.kjs_card{margin:0;border-radius:var(--dsw-radius-xl)}
+.kjs_cardHead{align-items:center;gap:14px;padding:8px;display:flex}
+.kjs_cardIcon{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-lg);width:48px;height:48px;color:var(--dsw-alias-label-secondary);flex:none;display:inline-flex;justify-content:center;align-items:center}
+.kjs_cardMain{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}
+.kjs_titleRow{flex-wrap:wrap;align-items:center;gap:8px;min-width:0;display:flex}
+.kjs_cardTitle{font-size:14px;font-weight:500;line-height:20px;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
+.kjs_cardSub{color:var(--dsw-alias-label-caption);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
+.kjs_cardDesc{color:var(--dsw-alias-label-tertiary);-webkit-line-clamp:1;-webkit-box-orient:vertical;font-size:13px;line-height:18px;display:-webkit-box;overflow:hidden}
+.kjs_cardEnd{z-index:1;flex:none;align-items:center;gap:8px;display:inline-flex}
+.kjs_cardWarn{margin:0;padding:0 8px 10px 70px;color:var(--dsw-alias-state-warn-primary);font-size:12px;line-height:18px}
+.kjs_rows{flex-direction:column;display:flex;margin:8px 0 0}
+.kjs_row{align-items:center;gap:8px;padding:6px 8px;border-bottom:.5px solid var(--dsw-alias-border-l3);display:flex;font-size:13px;line-height:18px}
+.kjs_row:last-child{border-bottom:0}
+.kjs_rowName{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.kjs_rowErr{color:var(--dsw-alias-state-error-primary);white-space:pre-wrap;font-size:12px}
+.kjs_empty{color:var(--dsw-alias-label-tertiary);font-size:13px;padding:8px}
+.kjs_loading,.kjs_error{padding:28px}
+.kjs_loading{color:var(--dsw-alias-label-tertiary)}
+.kjs_error{color:var(--dsw-alias-state-error-primary)}
+`
+
+    /** 注入面板样式（幂等）。 */
+    function ensurePanelCss() {
+      if (typeof document === 'undefined') return
+      if (document.querySelector(`style[data-plugin-css=${JSON.stringify(PANEL_CSS_ID)}]`) !== null) return
+      const tag = document.createElement('style')
+      tag.dataset.plugin = NS
+      tag.dataset.pluginCss = PANEL_CSS_ID
+      tag.textContent = PANEL_CSS
+      document.head.appendChild(tag)
     }
 
-    function badge(status) {
-      const colors = {
-        ok: '#22a06b', loaded: '#22a06b',
-        mismatch: '#e5680c', warning: '#e5680c',
-        invalid: '#c9372c', failed: '#c9372c', error: '#c9372c',
-        disabled: '#8b8b8b', empty: '#8b8b8b'
-      }
-      return `<span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:${colors[status] ?? '#8b8b8b'}">${esc(status)}</span>`
+    /** 包状态 → Tag tone（官方 Tag 的 tone 调色板）。 */
+    const STATUS_TONE = {
+      ok: 'success', loaded: 'success',
+      mismatch: 'warning', warning: 'warning',
+      invalid: 'danger', failed: 'danger', error: 'danger',
+      disabled: 'neutral', empty: 'neutral'
     }
 
-    /** 把面板数据渲染进容器（数据结构同 GET /dsh-kubejs/panel）。 */
-    function buildPanelDOM(container, data) {
-      // 面板数据里脚本包在 state.packages（顶层 data.packages 不存在，旧写法导致恒显示 0）
-      const pkgs = data.state?.packages ?? data.packages ?? []
-      const rows = pkgs.map((p) => `
-        <div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;border-bottom:1px dashed var(--border-color, #e5e5e5)">
-          ${badge(p.status)}
-          <b>${esc(p.name)}</b>
-          <span style="opacity:.7">→ ${esc(p.target ?? '-')}</span>
-          <span style="opacity:.5">${esc(p.plane)}</span>
-          ${p.reasons?.length ? `<span style="color:#e5680c">${esc(p.reasons.join('; '))}</span>` : ''}
-        </div>`).join('')
-
-      const scriptRows = [...executedScripts.entries()].map(([name, st]) => `
-        <div style="display:flex;gap:8px;align-items:baseline;padding:2px 0">
-          ${badge(st.ok ? 'loaded' : 'failed')}
-          <span>${esc(name)}</span>
-          ${st.ok ? '' : `<span style="color:#c9372c;white-space:pre-wrap">${esc(st.error)}</span>`}
-        </div>`).join('')
-
-      const ledgerRows = (data.ledger ?? []).map((e) => `
-        <div style="padding:2px 0"><code style="font-size:12px">${esc(e.script)}</code> <span style="opacity:.6">${esc(e.insertLine)}</span></div>`).join('')
-
-      container.innerHTML = `
-        <div style="max-width:960px;margin:0 auto;padding:28px clamp(24px,4vw,48px) 48px;box-sizing:border-box">
-          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
-            <b style="font-size:18px">dsh-kubejs 管理面板</b>
-            <span style="opacity:.6;font-size:12px">profile: ${esc(data.profile)} · root: ${esc(data.root)}</span>
-          </div>
-          <div style="display:flex;gap:12px;align-items:center;margin-bottom:14px">
-            <button data-act="reload" style="cursor:pointer">热重载</button>
-            <label style="display:flex;gap:4px;align-items:center;cursor:pointer">
-              <input type="checkbox" data-act="debug" ${data.debug ? 'checked' : ''}/> debug
-            </label>
-            <span style="opacity:.5;font-size:12px">client 脚本重载后建议刷新页面</span>
-          </div>
-          <fieldset style="border:1px solid var(--border-color,#ddd);border-radius:8px;margin:0 0 10px">
-            <legend>脚本包（${pkgs.length}）</legend>
-            ${rows || '<div style="opacity:.5">无</div>'}
-          </fieldset>
-          <fieldset style="border:1px solid var(--border-color,#ddd);border-radius:8px;margin:0 0 10px">
-            <legend>client 脚本执行状态</legend>
-            ${scriptRows || '<div style="opacity:.5">无</div>'}
-          </fieldset>
-          <fieldset style="border:1px solid var(--border-color,#ddd);border-radius:8px;margin:0">
-            <legend>配置覆写账本（cordis.patch.yml managed 区块）</legend>
-            ${ledgerRows || '<div style="opacity:.5">无</div>'}
-          </fieldset>
-        </div>`
-
-      container.querySelector('[data-act="reload"]').addEventListener('click', async () => {
-        try {
-          const res = await fetch(ROUTE, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'reload' }) })
-          const out = await res.json()
-          console.info('[dsh-kubejs] reload 结果:', out)
-          // server 侧重载完成；client 脚本不重复执行（刷新页面生效）
-          buildPanelDOM(container, await (await fetch(ROUTE)).json())
-        } catch (error) {
-          console.error('[dsh-kubejs] reload 失败:', error)
-        }
-      })
-      container.querySelector('[data-act="debug"]').addEventListener('change', async (e) => {
-        try {
-          await fetch(ROUTE, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'setDebug', value: e.target.checked }) })
-        } catch (error) {
-          console.error('[dsh-kubejs] setDebug 失败:', error)
-        }
-      })
+    /** 单个脚本包卡片：图标 + 名称 + 状态标签 + 描述 + 右侧启用开关。 */
+    function PackageCard({ pkg, onToggle }) {
+      const [busy, setBusy] = react.useState(false)
+      const enabled = pkg.disabled !== true
+      const targetText = pkg.target ? `→ ${pkg.target}${pkg.targetVersion ? `@${pkg.targetVersion}` : ''}` : ''
+      const sub = [pkg.plane, targetText, pkg.targetRange].filter(Boolean).join(' · ')
+      return react.createElement('li', { className: 'kjs_card', [MARK]: 'card' },
+        react.createElement('div', { className: 'kjs_cardHead' },
+          react.createElement('span', { className: 'kjs_cardIcon', 'aria-hidden': 'true' },
+            react.createElement(primitives.IconCodeOutlineRegular, { size: 24 })),
+          react.createElement('div', { className: 'kjs_cardMain' },
+            react.createElement('div', { className: 'kjs_titleRow' },
+              react.createElement('span', { className: 'kjs_cardTitle' }, pkg.name),
+              react.createElement(primitives.Tag, { tone: STATUS_TONE[pkg.status] ?? 'outline' }, String(pkg.status ?? 'unknown')),
+              pkg.author ? react.createElement(primitives.Tag, { tone: 'quiet' }, pkg.author) : null),
+            react.createElement('span', { className: 'kjs_cardSub' }, sub),
+            react.createElement('span', { className: 'kjs_cardDesc', title: pkg.description ?? '' },
+              pkg.description || `${pkg.plane} 脚本包（manifest 未写 description）`)),
+          react.createElement('div', { className: 'kjs_cardEnd' },
+            react.createElement(primitives.Switch, {
+              checked: enabled,
+              disabled: busy,
+              label: `${enabled ? '禁用' : '启用'} ${pkg.name}`,
+              title: enabled ? '禁用后不再加载（写回 manifest.json 的 disabled）' : '启用后立即重新加载',
+              onChange: (next) => {
+                setBusy(true)
+                Promise.resolve(onToggle(pkg.name, next)).finally(() => setBusy(false))
+              }
+            }))),
+        pkg.reasons?.length
+          ? react.createElement('p', { className: 'kjs_cardWarn' }, pkg.reasons.join('；'))
+          : null)
     }
 
-    /** 主面板页面组件：挂载时拉数据并渲染。 */
+    /** 主面板页面组件（挂载时拉数据并渲染）。 */
     function PanelPage() {
-      const ref = react.useRef(null)
-      react.useEffect(() => {
-        const el = ref.current
-        let alive = true
-        el.innerHTML = '<div style="opacity:.6;padding:28px">加载中…</div>'
-        fetch(ROUTE)
-          .then((r) => r.json())
-          .then((data) => { if (alive && el.isConnected) buildPanelDOM(el, data) })
-          .catch((error) => { if (alive && el.isConnected) el.innerHTML = `<div style="color:#c9372c;padding:28px">面板数据获取失败：${esc(error.message)}</div>` })
-        return () => { alive = false }
+      const [data, setData] = react.useState(null)
+      const [error, setError] = react.useState(null)
+      const [debugOn, setDebugOn] = react.useState(false)
+      const [busy, setBusy] = react.useState(false)
+      const [notice, setNotice] = react.useState('')
+
+      const load = react.useCallback(async () => {
+        try {
+          const next = await (await fetch(ROUTE)).json()
+          setData(next)
+          setDebugOn(Boolean(next.debug))
+          setError(null)
+        } catch (err) {
+          setError(String(err?.message ?? err))
+        }
       }, [])
-      return react.createElement('div', {
-        ref,
-        [MARK]: 'page',
-        style: { height: '100%', overflow: 'auto', boxSizing: 'border-box', color: 'var(--dsw-alias-label-primary, #1f2328)' }
-      })
+
+      react.useEffect(() => { ensurePanelCss(); load() }, [load])
+
+      const post = react.useCallback(async (body) => {
+        const res = await fetch(ROUTE, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+        const out = await res.json()
+        if (!out?.ok) throw new Error(out?.error ?? `HTTP ${res.status}`)
+        return out
+      }, [])
+
+      const onReload = async () => {
+        setBusy(true); setNotice('')
+        try {
+          await post({ action: 'reload' })
+          await load()
+          setNotice('server 脚本已重载')
+        } catch (err) {
+          setNotice(`重载失败：${err.message}`)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const onToggle = async (name, enabled) => {
+        setNotice('')
+        try {
+          await post({ action: 'setEnabled', name, enabled })
+          await load()
+          setNotice(`${name} 已${enabled ? '启用' : '禁用'}`)
+        } catch (err) {
+          setNotice(`操作失败：${err.message}`)
+        }
+      }
+
+      const onDebug = (value) => {
+        setDebugOn(value)
+        post({ action: 'setDebug', value }).catch((err) => setNotice(`debug 切换失败：${err.message}`))
+      }
+
+      if (error) return react.createElement('div', { className: 'kjs_error', [MARK]: 'page' }, `面板数据获取失败：${error}`)
+      if (!data) return react.createElement('div', { className: 'kjs_loading', [MARK]: 'page' }, '加载中…')
+
+      const pkgs = data.state?.packages ?? []
+      const scriptRows = [...executedScripts.entries()]
+      const ledger = data.ledger ?? []
+
+      return react.createElement('div', { className: 'kjs_page', [MARK]: 'page' },
+        react.createElement('header', { className: 'kjs_pageHead' },
+          react.createElement('div', null,
+            react.createElement('h1', { className: 'kjs_pageTitle' }, '脚本'),
+            react.createElement('p', { className: 'kjs_pageIntro' },
+              `dsh-kubejs 管理面板 · profile: ${data.profile} · root: ${data.root}`)),
+          react.createElement('div', { className: 'kjs_toolbar' },
+            notice ? react.createElement('span', { className: 'kjs_hint' }, notice) : null,
+            react.createElement(primitives.Checkbox, { checked: debugOn, label: 'debug', onChange: onDebug }),
+            react.createElement(primitives.Button, {
+              variant: 'outline',
+              size: 'sm',
+              disabled: busy,
+              icon: react.createElement(primitives.IconRefreshOutlineRegular, { size: 16 }),
+              onClick: onReload
+            }, '热重载'))),
+        react.createElement('section', null,
+          react.createElement('div', { className: 'kjs_sectionHead' },
+            react.createElement('h2', { className: 'kjs_sectionTitle' }, '脚本包'),
+            react.createElement('span', { className: 'kjs_count' }, String(pkgs.length))),
+          pkgs.length
+            ? react.createElement('ul', { className: 'kjs_cards' }, pkgs.map((p) =>
+                react.createElement(PackageCard, { key: `${p.plane}/${p.name}`, pkg: p, onToggle })))
+            : react.createElement('div', { className: 'kjs_empty' }, '无')),
+        react.createElement('section', null,
+          react.createElement('div', { className: 'kjs_sectionHead' },
+            react.createElement('h2', { className: 'kjs_sectionTitle' }, 'client 脚本执行状态'),
+            react.createElement('span', { className: 'kjs_count' }, String(scriptRows.length)),
+            react.createElement('span', { className: 'kjs_hint' }, 'client 脚本改动需刷新页面生效')),
+          scriptRows.length
+            ? react.createElement('div', { className: 'kjs_rows' }, scriptRows.map(([name, st]) =>
+                react.createElement('div', { className: 'kjs_row', key: name },
+                  react.createElement(primitives.Tag, { tone: st.ok ? 'success' : 'danger' }, st.ok ? 'loaded' : 'failed'),
+                  react.createElement('span', { className: 'kjs_rowName' }, name),
+                  st.ok ? null : react.createElement('span', { className: 'kjs_rowErr' }, String(st.error)))))
+            : react.createElement('div', { className: 'kjs_empty' }, '无')),
+        react.createElement('section', null,
+          react.createElement('div', { className: 'kjs_sectionHead' },
+            react.createElement('h2', { className: 'kjs_sectionTitle' }, '配置覆写账本'),
+            react.createElement('span', { className: 'kjs_count' }, String(ledger.length)),
+            react.createElement('span', { className: 'kjs_hint' }, 'cordis.patch.yml managed 区块')),
+          ledger.length
+            ? react.createElement('div', { className: 'kjs_rows' }, ledger.map((e, i) =>
+                react.createElement('div', { className: 'kjs_row', key: `${e.script}-${i}` },
+                  react.createElement('span', { className: 'kjs_rowName' }, String(e.script)),
+                  react.createElement('span', { className: 'kjs_hint' }, String(e.yaml ?? '').split('\n')[0]))))
+            : react.createElement('div', { className: 'kjs_empty' }, '无')))
     }
 
     // ---- 侧边栏「脚本」图标（SidebarPanelIconOwnerProps: { size, active }） ----

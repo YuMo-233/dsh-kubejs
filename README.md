@@ -25,10 +25,38 @@
 
 | 原语 | 作用 | 平面 |
 |---|---|---|
-| `api.on(event, handler)` | 事件钩子（waterfall，可改写事件数据，返回值继续传递） | server |
+| `api.on(event, handler)` | 事件钩子（真实挂在宿主 cordis 事件上；waterfall 语义见下） | server |
 | `api.slot(id, props, Component)` | 向 client 槽位注册 UI 组件 | client |
 | `api.config.override(path, value)` | 配置覆写（写入 profile cordis.patch.yml 的托管区块，带账本可精确摘除） | server |
 | `api.service.wrap(name, wrapper)` | 服务包装（洋葱式，可拦截/增强任意已注册服务） | server |
+
+### 事件钩子怎么用
+
+```js
+export function activate(api) {
+	// 只看不动：返回 undefined 就是完全透传，绝不干扰 DSH
+	api.on('agent/pre-step', (payload) => {
+		api.log.debug('当前步:', payload.step);
+	});
+
+	// 改决策：一定要先 await next() 拿到宿主的内建决策，再 spread 它
+	api.on('agent/pre-step', async (payload, next) => {
+		const decision = await next();          // { kind: 'enter', messages: [...] }
+		return { ...decision, delayHint: 800 };
+	});
+
+	// 拦截：不调 next()，直接返回自己的决策（宿主内建逻辑不再执行）
+	api.on('tools/pre-execute', (exec) => exec.name === 'kubejs_write_script'
+		? { kind: 'cancel', reason: '本会话禁止脚本自我改写' }
+		: undefined);
+}
+```
+
+三条纪律：
+
+1. **不拥有决策就返回 undefined**（透传），别自造对象——自造会顶掉宿主的内建决策字段。
+2. **想改就先 `await next()`**，再 spread 它的返回值。
+3. **钩子是异步的**，handler 可以是 async；慢 handler 会拖慢事件（这本身就是节奏控制能力）。
 
 逃生舱：`api.ctx` 全量直通（本机信任模型，读状态、钩冷门事件等「读或改」场景用它；**想「造」新东西时请写成独立插件**——脚本的产出是行为差异，插件的产出是可依赖、可分发的东西）。
 

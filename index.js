@@ -6,9 +6,10 @@
  * 2. 注册管理面板 HTTP API（面板数据读写走同源路由）
  * 3. 启动时扫描 DSH_HOME/dsh-kubejs/ 并加载 server 脚本
  */
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHost } from './host.js';
+import { createPluginResolver } from './lib/resolve.js';
 import { scriptsRoot, dshHome } from './lib/shared.js';
 import { readLedger } from './lib/patch-ledger.js';
 import { buildPresetPlugins } from './lib/preset.js';
@@ -56,11 +57,17 @@ export function apply(ctx, config) {
 	// 否则回退 ~/.dsh/profiles/desktop
 	let profileName = 'desktop';
 	let patchPath = join(dshHome(), 'profiles', profileName, 'cordis.patch.yml');
+	let profileDir = join(dshHome(), 'profiles', profileName);
 	try {
 		const profileContext = ctx.get('profileContext');
 		if (typeof profileContext?.name === 'string' && profileContext.name !== '') profileName = profileContext.name;
 		if (typeof profileContext?.patchPath === 'string') patchPath = profileContext.patchPath;
+		if (typeof profileContext?.dir === 'string' && profileContext.dir !== '') profileDir = profileContext.dir;
+		else profileDir = join(dshHome(), 'profiles', profileName);
 	} catch { /* 尽力推断 */ }
+
+	// 目标插件版本解析：先试 profile 的 node_modules，再退回 patch.yml 里的绝对路径线索
+	const resolvePlugin = createPluginResolver({ profileDir, patchPath, logger });
 
 	// ---- host 组装 ----
 	const notify = {
@@ -79,7 +86,7 @@ export function apply(ctx, config) {
 	const host = createHost({ ctx, logger, profileName, patchPath, notify });
 
 	// ---- 服务提供：kubejsHost（行插件 tools-row.mjs 从这里取 host 组装工具）----
-	ctx.provide('kubejsHost', { host, profileName, patchPath });
+	ctx.provide('kubejsHost', { host, profileName, patchPath, resolvePlugin });
 
 	// ---- 「dsh-kubejs 模式」agent preset 声明 ----
 	// 照 liangshen 模式：运行时 ctx.agentPresets.register 声明，不改 DSH 本体。
@@ -157,7 +164,7 @@ export function apply(ctx, config) {
 							profile: profileName,
 							debug,
 							state: host.state,
-							clientScripts: host.collectClientScripts(),
+							clientScripts: host.collectClientScripts({ resolvePlugin }),
 							ledger: readLedger(patchPath)
 						});
 						return;
@@ -167,8 +174,25 @@ export function apply(ctx, config) {
 						// action: reload | setDebug
 						if (body.action === 'reload') {
 							host.unloadAll();
-							const summary = await host.loadAll({ profile: profileName });
+							const summary = await host.loadAll({ profile: profileName, resolvePlugin });
 							sendJson(res, 200, { ok: true, summary, state: host.state });
+							return;
+						}
+						// 启用/禁用脚本包：写回 manifest.json 的 disabled 字段后重载
+						if (body.action === 'setEnabled') {
+							const pkg = host.state.packages.find((p) => p.name === body.name);
+							if (!pkg) {
+								sendJson(res, 404, { ok: false, error: `脚本包不存在: ${String(body.name)}` });
+								return;
+							}
+							const manifestPath = join(pkg.dir, 'manifest.json');
+							const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+							manifest.disabled = body.enabled === false;
+							writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+							host.unloadAll();
+							const summary = await host.loadAll({ profile: profileName, resolvePlugin });
+							logger.info?.(`[dsh-kubejs] 脚本包 ${pkg.name} 已${manifest.disabled ? '禁用' : '启用'}`);
+							sendJson(res, 200, { ok: true, disabled: manifest.disabled, summary, state: host.state });
 							return;
 						}
 						if (body.action === 'setDebug') {
@@ -193,8 +217,11 @@ export function apply(ctx, config) {
 			mkdirSync(scriptsRoot(), { recursive: true });
 			mkdirSync(join(scriptsRoot(), 'server_scripts'), { recursive: true });
 			mkdirSync(join(scriptsRoot(), 'client_scripts'), { recursive: true });
-			const summary = await host.loadAll({ profile: profileName });
+			const summary = await host.loadAll({ profile: profileName, resolvePlugin });
 			logger.info?.(`[dsh-kubejs] server 脚本加载完成: ${summary.loaded} loaded, ${summary.mismatch.length} mismatch, ${summary.disabled.length} disabled, ${summary.invalid.length} invalid, ${summary.failed.length} failed`);
+			for (const pkg of summary.packages) {
+				logger.info?.(`[dsh-kubejs]  ├ ${pkg.name} [${pkg.status}] target=${pkg.target}${pkg.targetVersion ? `@${pkg.targetVersion}` : ''} ${pkg.reasons.length ? `· ${pkg.reasons.join('; ')}` : ''}`);
+			}
 		} catch (error) {
 			logger.error?.('[dsh-kubejs] 启动加载失败（不影响 DSH 运行）:', error?.stack ?? error);
 		}
