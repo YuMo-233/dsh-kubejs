@@ -141,12 +141,13 @@ mklink /J "%DSH_HOME%\profiles\desktop\node_modules\dsh-kubejs" "<clone 路径>"
   "target": "qq-bridge",
   "targetRange": ">=1.0.0 <2.0.0",
   "description": "让 snowluma 的回复更有人味",
-  "author": "you",
+  "author": "YuMo233",
   "disabled": false
 }
 ```
 
 - `target`（必填）：目标插件包名；`targetRange`（可选）：semver 范围（支持 `^ ~ >= > < <= =` 及空格 AND 组合）。
+- `author`（可选）：作者署名，写作者本人的名字（本仓库统一 `YuMo233`）；面板包卡片右上角会以灰色标签显示。
 - 包内 `.js` 自动扫描发现；包内脚本**禁止互相 import**（脚本是叶子，不是构建块）。
 - 失配以包为单位：目标未安装或版本不满足 → **整包禁用 + 日志 + notify 报警**。
 - 包内可放可选的 `profiles` 白名单，限制脚本只作用于特定 profile。
