@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert';
 import { writeScriptOverrides, readLedger, removeScriptEntries } from '../lib/patch-ledger.js';
+import { findBareYamlSeparator } from '../lib/shared.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'kubejs-ledger-'));
 const patchPath = join(dir, 'cordis.patch.yml');
@@ -47,6 +48,48 @@ assert(!finalText.includes('mirror.example.com'), 'scriptA 摘除后其覆写值
 assert(finalText.includes('detailed'), 'scriptB 覆写值应写入');
 assert(finalText.includes('dsh-agent-sync managed'), '手写区块应保留');
 assert(finalText.includes("name: '@local/dsh-subagent-model-switch'"), '手写条目应保留');
+
+// 5. 写盘闸门：区块之外有裸 --- 时拒绝写盘，且原文件一个字节都不动
+const guardPath = join(dir, 'guard.yml');
+writeFileSync(guardPath, `# Your patch layer
+- id: keep-me
+  config:
+    a: 1
+
+---
+- id: someone-broke-it
+  config:
+    b: 2
+`);
+const beforeGuard = readFileSync(guardPath, 'utf8');
+let guardError = null;
+try {
+	writeScriptOverrides(guardPath, 'scriptC', [{ path: 'keep-me.config.c', value: 3 }]);
+} catch (e) {
+	guardError = e;
+}
+assert(guardError, '区块外存在裸 --- 时必须抛错拒绝写盘');
+assert(/拒绝写入/.test(guardError.message), `错误信息应说明拒绝写入，实际: ${guardError.message}`);
+assert(/第 6 行/.test(guardError.message), `应报出裸 --- 的行号，实际: ${guardError.message}`);
+assert.equal(readFileSync(guardPath, 'utf8'), beforeGuard, '拒绝写盘时原文件必须一个字节都不变');
+assert(!readFileSync(guardPath, 'utf8').includes('scriptC'), '拒绝写盘时绝不能留下新写入的内容');
+
+// 手工修好（加 # 前缀）后应能正常写入
+writeFileSync(guardPath, beforeGuard.replace(/^---$/m, '# ---'));
+writeScriptOverrides(guardPath, 'scriptC', [{ path: 'keep-me.config.c', value: 3 }]);
+const healed = readFileSync(guardPath, 'utf8');
+assert(healed.includes('# script:scriptC'), '修好后应能正常写入');
+assert(healed.includes('c: 3'), '修好后覆写值应写入');
+assert.equal(findBareYamlSeparator(healed), null, '写入结果不应含裸分隔符');
+
+// 闸门函数本身：各种形态的裸分隔符都要认，注释行不算
+assert(findBareYamlSeparator('# --- ok ---') === null, '注释行不算违规');
+assert(findBareYamlSeparator('---')?.line === 1, '顶格 --- 应认');
+assert(findBareYamlSeparator('  --- ')?.line === 1, '缩进 --- 应认');
+assert(findBareYamlSeparator('--- dsh-kubejs managed BEGIN ---')?.line === 1, '裸标记行应认');
+assert(findBareYamlSeparator('...')?.line === 1, '文档结束符 ... 应认');
+assert(findBareYamlSeparator('----') === null, '四个横杠不是分隔符，不应误报');
+assert(findBareYamlSeparator('a: ---') === null, '值里含 --- 不应误报');
 
 console.log('ledger tests OK');
 console.log('--- final patch.yml ---');

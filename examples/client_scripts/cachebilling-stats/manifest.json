@@ -1,7 +1,0 @@
-{
-  "target": "meow-cachebilling",
-  "targetRange": ">=0.0.0",
-  "description": "meow-cachebilling 面板统计行增强（client 槽位 UI 示例）",
-  "author": "dsh-kubejs",
-  "disabled": false
-}

@@ -1,7 +1,0 @@
-{
-  "target": "qq-bridge",
-  "targetRange": ">=0.0.0",
-  "description": "server 事件钩子示例：观察 agent/pre-step（api.on + waterfall next）",
-  "author": "dsh-kubejs",
-  "disabled": false
-}

@@ -189,7 +189,7 @@ client 平面在左侧边栏注册「脚本」入口（位于「插件」按钮�
 
 同一插件实例（同 `- id:`）**分多次写不同路径是累加而非覆盖**：账本按 (包 id + 配置路径) 深合并，写第二次不会抹掉第一次的键。
 
-> 给插件作者的提醒：托管区块的标记行必须以 `#` 开头（`# --- ... managed BEGIN ---`）。写成裸 `--- ...` 会被 YAML 当成文档分隔符，导致整个 `cordis.patch.yml` 解析失败、DSH 起不来。
+托管区块的标记行**必须**以 `#` 开头，写成裸 `--- ... managed BEGIN ---` 会让 DSH 起不来 —— 详见下面「已知坑与硬约束」。
 
 ## 故障隔离
 
@@ -220,7 +220,52 @@ node test/preset.test.mjs   # agent preset 构建与工具行装配
 node test/fetch-wrap.test.mjs  # fetch 拦截：匹配 / 洋葱 / 卸载还原 + 空闲看门狗
 ```
 
-`examples/` 内有三个可直接参考的脚本包：`snowluma-humanize`（server 事件钩子 + 配置覆写）、`cachebilling-stats`（client 槽位统计行）与 `qq-wait-backfill`（钩 `tools/post-execute` 改写工具返回 content）。
+## 已知坑与硬约束
+
+这些是用真实故障换来的，改 dsh-kubejs 或写脚本前请先读一遍。前两条已有工程护栏兜底，剩下的靠纪律。
+
+### 1. 绝不能往 cordis.patch.yml 写裸 `---`（已有硬护栏）
+
+**症状**：DSH Desktop 起不来，报 `YAMLException: end of the stream or a document separator is expected`。
+
+**原因**：YAML 里 `---` 是文档分隔符。托管区块的标记行如果写成裸 `--- dsh-kubejs managed BEGIN ---`，会把整个 patch.yml 劈成三个文档，解析直接失败。这个坑的真实来历只是「当初觉得 `--- xxx ---` 看起来像条醒目分隔线」——它没有任何功能必要性。
+
+**正确写法**：标记行必须是注释，以 `#` 开头：
+
+```yaml
+# --- dsh-kubejs managed BEGIN ---
+# script: my-script
+- id: some-plugin
+  config:
+    key: value
+# --- dsh-kubejs managed END ---
+```
+
+**护栏**：写入统一走 `markerLine()`（自动加 `# `），定位走 `findMarkerLine()`（裸行和注释行都认，所以历史遗留的坏文件下次写入会自动痊愈）。此外 `writeScriptOverrides()` 在写盘前会用 `findBareYamlSeparator()` 扫全文，**命中裸分隔符就抛错、一个字节都不写**。所以 dsh-kubejs 不可能再写出一个会让 DSH 起不来的 patch.yml。
+
+### 2. manifest.json 不能带 BOM
+
+**症状**：包状态 `invalid`，日志 `manifest.json 解析失败: Unexpected token`，但文件肉眼看完全正常。
+
+**原因**：用 `Set-Content`（PowerShell 默认）写文件会加 UTF-8 BOM（`ef bb bf`），`JSON.parse` 认不了首字节。
+
+**正确做法**：写 manifest.json 用无 BOM 的 UTF-8（推荐 `kubejs_write_script` 工具，它走 `writeFileSync(path, content, 'utf8')`）；手工写的话 PowerShell 用 `-Encoding utf8NoBOM`。
+
+### 3. 改脚本后必须 reload，但改了文件名就得重启
+
+ESM 按 URL 缓存，`kubejs_reload` 会击穿缓存所以**改内容即时生效**；但新增/删除/重命名脚本文件属于新的 loader entry，**必须重启 DSH**。
+
+### 4. client 脚本不能 import/export
+
+client 平面由 `new Function` 执行，只能用 `require()` 取页面已打包的模块（`react`、`@deepseek-ai/dsh-client-ui-primitives` 等）。写了 `import` 会在落盘校验阶段就被拒。
+
+### 5. 脚本之间禁止互相 import
+
+脚本是叶子不是构建块 —— 共享代码请写在同一个脚本里，或「毕业」成独立插件。
+
+### 6. 事件钩子别自造决策对象
+
+不拥有决策就 `return undefined`（透传）；要改就先 `await next()` 拿宿主内建决策再 spread 它。直接返回自造对象会顶掉宿主的 `kind`/`messages` 等字段。
 
 ## License
 
