@@ -7,6 +7,11 @@ import { pathToFileURL } from 'node:url';
 import { scanPackages, PLANES } from './lib/scanner.js';
 import { createScriptApi } from './lib/api.js';
 import { writeScriptOverrides, removeScriptEntries } from './lib/patch-ledger.js';
+import { normalizeRequest, matchRequest } from './lib/fetch-match.js';
+import { createIdleSignal, wrapResponseBody } from './lib/idle-signal.js';
+
+/** 注入给 fetch handler 的内置 helper（脚本无需 import 插件内路径即可获得看门狗能力）。 */
+const FETCH_HELPERS = Object.freeze({ createIdleSignal, wrapResponseBody });
 
 /**
  * 创建 dsh-kubejs host。
@@ -25,6 +30,10 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 	const loadedScripts = new Map();  // scriptName -> {pkg, api}
 	const bridges = new Map();        // event -> 宿主 cordis 注销函数（undefined = 离线/桩环境）
 	let packagesSnapshot = [];        // 最近一次 loadAll 的包列表（面板展示用）
+	// fetch 拦截：全局 patch 引用计数 + 规则注册表（洋葱式，按注册顺序派发）。
+	const fetchRules = [];            // [{ scriptName, matcher, handler }]
+	let nativeFetch = null;           // 安装时捕获的原 globalThis.fetch（可能是别的插件的 patch，链式保留）
+	let fetchPatched = false;
 
 	const log = {
 		info: (...a) => logger?.info?.(...a),
@@ -45,6 +54,7 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 		},
 		addHook,
 		wrapService,
+		wrapFetch,
 		writeOverride,
 		log,
 		notify(name, message, level = 'info') {
@@ -76,6 +86,7 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 		}
 		const wrapsOf = wrapped.get(scriptName);
 		if (wrapsOf) wrapsOf.length = 0;
+		dropFetchRules(scriptName);
 		host.removeLedgerEntries(scriptName);
 		log.warn(`脚本 ${scriptName} 已被隔离: ${reason}`);
 		host.notify(scriptName, `脚本异常被隔离: ${reason}`, 'warning');
@@ -194,6 +205,87 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 		writeScriptOverrides(patchPath, scriptName, [{ path, value }]);
 	}
 
+	// ---- fetch 拦截内核（原语⑤）----
+	// 洋葱式：脚本 handler(request, next)。request 由 normalizeRequest 归一，携带可改写的
+	// init（脚本 mutate request.init.signal/method/headers 即可改请求）；await next() 拿到
+	// Response 后可用 idle-signal.wrapResponseBody 包 body。handler 返回 undefined = 框架代发。
+	// 首次注册装 globalThis.fetch 补丁（捕获 patch 前的 native 以便卸载还原）；最后一条规则
+	// 移除时还原，卸载即净。规则按注册顺序派发。
+
+	/** 注册一条 fetch 拦截规则。matcher 见 lib/fetch-match，handler(request,next)。返回撤销函数。 */
+	function wrapFetch(scriptName, matcher, handler) {
+		if (typeof handler !== 'function') throw new Error('api.fetch.wrap: handler 必须是函数');
+		installFetchPatch();
+		const entry = { scriptName, matcher, handler };
+		fetchRules.push(entry);
+		log.debug(`fetch 拦截登记: ${scriptName}`);
+		return () => {
+			const idx = fetchRules.indexOf(entry);
+			if (idx >= 0) fetchRules.splice(idx, 1);
+			if (fetchRules.length === 0) uninstallFetchPatch();
+		};
+	}
+
+	/** 摘除某脚本的全部 fetch 规则（隔离/重载用）。 */
+	function dropFetchRules(scriptName) {
+		for (let i = fetchRules.length - 1; i >= 0; i--) {
+			if (fetchRules[i].scriptName === scriptName) fetchRules.splice(i, 1);
+		}
+		if (fetchRules.length === 0) uninstallFetchPatch();
+	}
+
+	function installFetchPatch() {
+		if (fetchPatched) return;
+		if (typeof globalThis.fetch !== 'function') {
+			log.warn('全局 fetch 不可用，fetch 拦截未安装（脚本将无法拦截网络请求）');
+			return;
+		}
+		nativeFetch = globalThis.fetch;
+		globalThis.fetch = patchedFetch;
+		fetchPatched = true;
+		log.debug('全局 fetch 拦截补丁已安装');
+	}
+
+	function uninstallFetchPatch() {
+		if (!fetchPatched) return;
+		// 仅当当前 fetch 仍是本补丁时还原，避免覆盖更晚安装的其他 patch。
+		if (globalThis.fetch === patchedFetch) globalThis.fetch = nativeFetch;
+		else log.warn('全局 fetch 已被其他补丁接管，保留现状不还原');
+		fetchPatched = false;
+		nativeFetch = null;
+		log.debug('全局 fetch 拦截补丁已卸载');
+	}
+
+	/** 实际替换 globalThis.fetch 的函数。 */
+	async function patchedFetch(input, init) {
+		const request = normalizeRequest(input, init);
+		const relevant = fetchRules.filter((rule) => !failed.has(rule.scriptName) && matchRequest(rule.matcher, request));
+		if (relevant.length === 0) {
+			return nativeFetch.call(globalThis, input, init);
+		}
+		let cursor = 0;
+		// 洋葱 next：脚本调用 next() 时框架用「脚本当前 request」代发一次 fetch（经真实 fetch，
+		// 不再递归进本补丁）。多个规则时按注册顺序串成链：外层脚本的 next 调进内层脚本。
+		const run = async (depth) => {
+			if (depth >= relevant.length) {
+				return nativeFetch.call(globalThis, request.input, request.init);
+			}
+			const rule = relevant[depth];
+			const next = () => run(depth + 1);
+			let out;
+			try {
+				out = await rule.handler(request, next, FETCH_HELPERS);
+			} catch (error) {
+				log.error(`fetch 拦截异常（脚本 ${rule.scriptName}），降级为放行原请求:`, error?.message ?? error);
+				// 脚本已炸：用当前 request（可能被前置脚本改过）继续整链，不让它阻断网络
+				return run(depth + 1);
+			}
+			// 脚本返回 undefined = 它没代发、希望框架代发；返回 Response = 它已代发或自行构造。
+			return out === undefined ? next() : out;
+		};
+		return run(0);
+	}
+
 	/**
 	 * 加载所有脚本包。
 	 * @param {object} opts
@@ -268,6 +360,9 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 				},
 				addHook: (n, e, h) => addHook(n, e, h),
 				wrapService: (n, s, w) => wrapService(n, s, w),
+				wrapFetch: (n, m, h) => wrapFetch(n, m, h),
+				createIdleSignal,
+				wrapResponseBody,
 				writeOverride: (n, p, v) => writeOverride(n, p, v),
 				log,
 				notify: host.notify
@@ -288,6 +383,9 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 		disposeBridges();
 		hooks.clear();
 		wrapped.clear();
+		// fetch 规则全清 + 还原全局 fetch（卸载即净，不留补丁）。
+		fetchRules.length = 0;
+		uninstallFetchPatch();
 		loadedScripts.clear();
 	}
 
@@ -325,6 +423,8 @@ export function createHost({ ctx, logger, profileName, patchPath, notify, root }
 				failed: [...failed],
 				hooks: hooks.size,
 				wrapped: wrapped.size,
+				fetchRules: fetchRules.map((r) => r.scriptName),
+				fetchPatched,
 				bridges: [...bridges.keys()],
 				packages: packagesSnapshot
 			};
