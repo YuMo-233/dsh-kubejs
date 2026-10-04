@@ -24,8 +24,10 @@
   },
   "files": [
     "index.js",
+    "host.js",
     "client.js",
     "lib",
+    "examples",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
