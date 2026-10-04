@@ -1,0 +1,7 @@
+{
+  "target": "qq-bridge",
+  "targetRange": ">=0.0.0",
+  "description": "修复「回复/思考期间到达的消息在 qq_wait_for_messages 里看不到」：给 wait 的返回补回未展示的新消息（桥接 baseline 用裸到达水位导致漏报）",
+  "author": "dsh-kubejs",
+  "disabled": false
+}

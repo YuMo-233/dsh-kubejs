@@ -190,7 +190,7 @@ node test/ledger.test.mjs   # 配置覆写账本：写入 / 摘除 / 幂等
 node test/preset.test.mjs   # agent preset 构建与工具行装配
 ```
 
-`examples/` 内有两个可直接参考的脚本包：`snowluma-humanize`（server 事件钩子 + 配置覆写）与 `cachebilling-stats`（client 槽位统计行）。
+`examples/` 内有三个可直接参考的脚本包：`snowluma-humanize`（server 事件钩子 + 配置覆写）、`cachebilling-stats`（client 槽位统计行）与 `qq-wait-backfill`（钩 `tools/post-execute` 改写工具返回 content）。
 
 ## License
 
