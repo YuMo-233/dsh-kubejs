@@ -252,21 +252,43 @@ node test/fetch-wrap.test.mjs  # fetch 拦截：匹配 / 洋葱 / 卸载还原 +
 
 **正确做法**：写 manifest.json 用无 BOM 的 UTF-8（推荐 `kubejs_write_script` 工具，它走 `writeFileSync(path, content, 'utf8')`）；手工写的话 PowerShell 用 `-Encoding utf8NoBOM`。
 
-### 3. 改脚本后必须 reload，但改了文件名就得重启
+### 3. 改脚本 reload 即可，新增/删除脚本包也是
 
-ESM 按 URL 缓存，`kubejs_reload` 会击穿缓存所以**改内容即时生效**；但新增/删除/重命名脚本文件属于新的 loader entry，**必须重启 DSH**。
+ESM 按 URL 缓存，`kubejs_reload` 会击穿缓存所以**改内容即时生效**；新增/删除脚本包同样只需 reload —— `loadAll` 每次都重扫脚本目录（实测新增包 reload 后立刻 `status: ok` 并加载），**不需要重启 DSH**。
 
-### 4. client 脚本不能 import/export
+真正需要重启的是**改了脚本的 `name`（文件名）**：同一份代码换了文件名，宿主里会残留下旧 entry 的事件绑定。
+
+### 4. 脚本必须用 ESM 导出 activate
+
+服务端脚本只认 `export function activate(api)`。写成 CJS 的 `module.exports = { activate }` **不会报任何错**，包状态仍是 `ok`、reload 也报成功，但 `activate` 永远不会被调用——脚本静默失效，最难查。
+
+### 5. client 脚本不能 import/export
 
 client 平面由 `new Function` 执行，只能用 `require()` 取页面已打包的模块（`react`、`@deepseek-ai/dsh-client-ui-primitives` 等）。写了 `import` 会在落盘校验阶段就被拒。
 
-### 5. 脚本之间禁止互相 import
+### 6. 脚本之间禁止互相 import
 
 脚本是叶子不是构建块 —— 共享代码请写在同一个脚本里，或「毕业」成独立插件。
 
-### 6. 事件钩子别自造决策对象
+### 7. 事件钩子别自造决策对象
 
 不拥有决策就 `return undefined`（透传）；要改就先 `await next()` 拿宿主内建决策再 spread 它。直接返回自造对象会顶掉宿主的 `kind`/`messages` 等字段。
+
+### 8. 绝不要手工 `ctx.emit` 别人的水面事件（会崩 DSH）
+
+**症状**：DSH 整个挂掉，Host 子进程 `exitCode: 1`，日志末尾 `dsh-plugin-desktop: fatal load failure: TypeError: next is not a function`。
+
+**原因**：水面（waterfall）事件的监听器签名是 `(payload, next)`，别人实现的监听器会**无条件调用 `next()`**。脚本里图省事写 `await ctx.emit('agent/request', { agent })` 只传了 payload、没传 `next`，任何第三方 listener（实测 `@linxin666/dsh-liangshen` 的 `presets/liangshen/guard.mjs:374`）一执行就抛 `TypeError`，冒泡成 host 的 fatal load failure，Host 进程被直接 kill。
+
+**正确做法**：不要自己 emit 事件。要观察就用 `api.on(事件, () => { ...; return undefined })`（dsh-kubejs 的 bridge 会负责造 `next`）；要自测就别走事件，直接调用自己的内部函数。
+
+### 9. 宿主 webServer 的 POST body 读不可靠，状态走 query 兜底
+
+**症状**：`POST` 带 JSON body 恒被拒（如 `{"success":false,"error":"enabled must be boolean"}`），但把同样的值放进 URL query 就成功。
+
+**原因**：宿主 webServer 的 `req` 在这条链路上拿不到可靠的 body（实测连宿主自己的 `/dsh-kubejs/panel` 路由用 `curl -d` 都会 `JSON body 解析失败`），非脚本自身 bug。
+
+**正确做法**：状态类接口同时支持 query 与 body 两个通道，且**关键参数（如 `workspaceId`）走 query**，body 只作为可选补充。写 `readJsonBody` 时用 `chunks.push(chunk)` + `Buffer.concat(chunks).toString('utf8')`，逐块字符串拼接不可靠。
 
 ## License
 
